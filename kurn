@@ -1,0 +1,67 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'digest'
+require 'tempfile'
+
+# parse out aguments like the image to use
+
+script = if File.file?(ARGV[1])
+           File.read(ARGV[1])
+         elsif !STDIN.tty?
+           STDIN.read
+         else
+           puts "must provide a script or be a povide a command via stdin"
+         end
+
+app_name = Digest::SHA256.base64digest script
+
+kube_api_file = Tempfile.new('foo')
+
+kube_api_file.print YAML.dump(
+  { 
+    "apiVersion"=> "v1",
+    "kind"=> "ConfigMap",
+    "metadata"=> {"name"=> "#{app_name}"},
+    "data"=> {"script"=> "#{script}"}
+  }
+)
+
+# to do mount and a sleep
+kube_api_file.print YAML.dump(
+  {
+    "apiVersion"=> "batch/v1",
+    "kind"=> "Job",
+    "metadata"=> {"name"=> "#{app_name}"},
+    "spec"=> {
+      "template"=> { 
+        "spec"=> { 
+          "containers"=> [
+            { 
+              "name"=> "#{app_name}", 
+              "image"=> "perl", 
+              "command"=> ["perl",  "-Mbignum=bpi", "-wle", "print bpi(2000)"],
+              "volumeMounts"=> [{"name"=> "script-volume", "mountPath"=> "/script" }]
+            }
+          ],  
+          "volumes"=> [
+            { 
+              "name"=> "script-volume",
+              "configMap"=> { "name"=> "#{app_name}"}
+            }
+          ],
+          "restartPolicy"=> "Never"
+        }
+      }
+    }
+  }
+)
+kube_api_file.rewind
+puts kube_api_file.read
+
+# create the new job 
+# `kubectl create -f '#{kube_api_file.path}'`
+# find the job/report any problems creatin the app
+# find the attached pod
+# attach to the pod exposing a tty and iteracive prop to the user and run the config map
+# when it finishes ( succseed or fails) kill the job and the configmap
