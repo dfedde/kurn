@@ -3,18 +3,23 @@
 require 'yaml'
 require 'digest'
 require 'tempfile'
+require 'json'
+require 'pty'
 
 # parse out aguments like the image to use
 
-script = if File.file?(ARGV[1])
+script = if File.file?("#{ARGV[1]}")
            File.read(ARGV[1])
          elsif !STDIN.tty?
            STDIN.read
          else
-           puts "must provide a script or be a povide a command via stdin"
+           puts "must provide a script or be provided via stdin"
+           exit(1)
          end
 
-app_name = Digest::SHA256.base64digest script
+image = ARGV[0]
+
+app_name = (Digest::SHA256.base64digest script).each_char.select{|c| c.match(/[a-z]/)}.join
 
 kube_api_file = Tempfile.new('foo')
 
@@ -39,8 +44,10 @@ kube_api_file.print YAML.dump(
           "containers"=> [
             { 
               "name"=> "#{app_name}", 
-              "image"=> "perl", 
-              "command"=> ["perl",  "-Mbignum=bpi", "-wle", "print bpi(2000)"],
+              "image"=> "#{image}",
+              "command"=> ["sh"],
+              "tty" => true,
+              "stdin" => true,
               "volumeMounts"=> [{"name"=> "script-volume", "mountPath"=> "/script" }]
             }
           ],  
@@ -56,12 +63,58 @@ kube_api_file.print YAML.dump(
     }
   }
 )
+
 kube_api_file.rewind
 puts kube_api_file.read
 
 # create the new job 
-# `kubectl create -f '#{kube_api_file.path}'`
-# find the job/report any problems creatin the app
+`kubectl create -f '#{kube_api_file.path}'`
+
+at_exit do
+  `kubectl delete -f '#{kube_api_file.path}'`
+end
+
+def all(kind)
+  JSON.parse(`kubectl get #{kind} -o json`)['items']
+end
+
+def describe(resource)
+  system("kubectl describe #{resource['kind']} #{resource['metadata']['name']}")
+end
+
+def logs(resource)
+  system("kubectl logs #{resource['metadata']['name']}")
+end
+
+def with_name(name, resources)
+  resources.select{|i| i['metadata']['name'].include?(name)}
+end
+
+resource = ->{with_name(app_name, all('pods')).first}
+
+until (state = resource[]['status']['containerStatuses'][0]['state'].to_a[0][0]) != 'waiting'
+sleep 5
+end
+
+unless state == 'running'
+  logs(resource[])
+end
+
+t = Thread.new do
+  sleep 1
+  master, slave = PTY.open do |leader, follower|
+    read, write = IO.pipe
+    spawn("kubectl attach #{resource[]['metadata']['name']} -i", :in=>read, :out=>follower)
+    write.puts("chmod +x /script/script")
+    write.puts("/script/script")
+  end
+end
+
+sleep 1
+
+system("kubectl attach -it #{resource[]['metadata']['name']}")
+t.join
+# find the job/report any problems creating the app
 # find the attached pod
 # attach to the pod exposing a tty and iteracive prop to the user and run the config map
 # when it finishes ( succseed or fails) kill the job and the configmap
